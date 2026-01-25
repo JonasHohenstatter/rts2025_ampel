@@ -12,8 +12,6 @@
 #include "commands.h"
 #include "tm1637.h"
 
-// Channel has to be set to a fixed value
-
 ampel_state_t state = STATE_INIT;
 ampel_config_t my_lights[] = {
     { .red = GPIO_NUM_18, .yellow = GPIO_NUM_22, .green = GPIO_NUM_23, 0 },
@@ -22,11 +20,11 @@ ampel_config_t my_lights[] = {
 
 #define SETUP_ID 1
 #define SETUP_SIZE 4
-
 #define CLK_PIN 18
 #define DIO_PIN 19
-
 #define Seconds * 1000000
+#define CHANNEL 1
+#define LIGHT_COUNT (sizeof(my_lights) / sizeof(ampel_config_t))
 
 role_t role = ROLE_IDLE;
 
@@ -40,16 +38,14 @@ int64_t next_event = 0;
 
 tm1637_led_t *display;
 
-// TODO: this isn't really accounting for delay, redo
-int64_t master_offset = 0;
-
-#define LIGHT_COUNT (sizeof(my_lights) / sizeof(ampel_config_t))
-
 typedef struct {
     char command;
     uint8_t group;
     int64_t timestamp;
 } switchParams_t;
+
+// TODO: this isn't really accounting for delay, redo
+int64_t master_offset = 0;
 
 void show_time_count() {
     while(1) {
@@ -58,13 +54,8 @@ void show_time_count() {
         if(next_event == 0) {
             continue;
         }
-        
         int64_t delta = next_event - esp_timer_get_time();
-
-
         int64_t remaining_seconds = (delta / 1000000);
-
-        printf("%lli", remaining_seconds);
 
         if(remaining_seconds < 0) {
             remaining_seconds = 0;
@@ -81,7 +72,7 @@ void switch_lights(void *pvParameters) {
 
     next_event = timestamp;
 
-    vTaskDelay(pdMS_TO_TICKS(10)); // small delay to ensure task setup
+    vTaskDelay(pdMS_TO_TICKS(10));
 
     int64_t now_master = esp_timer_get_time() - master_offset;
     while (now_master < timestamp) {
@@ -93,8 +84,6 @@ void switch_lights(void *pvParameters) {
         vTaskDelay(pdMS_TO_TICKS((uint32_t)diff_ms));
         now_master = esp_timer_get_time() - master_offset;
     }
-    
-    // Case switch to Green
     if (command == 'G') {
         printf("Switching to Green.\n");
         for (int i = 0; i < LIGHT_COUNT; i++) {
@@ -114,7 +103,6 @@ void switch_lights(void *pvParameters) {
             }
         vTaskDelay(pdMS_TO_TICKS(10));
         }
-    // Case switch to Red
     else {
         printf("Switching to Red.\n");
         for (int i = 0; i < LIGHT_COUNT; i++) {
@@ -224,7 +212,7 @@ void on_receive(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
             if(memcmp(master_mac, info->src_addr, 6) != 0) return;
             if(esp_now_is_peer_exist(info->src_addr)) return;
 
-            esp_now_peer_info_t new_peer = { .channel = 1, .encrypt = false };
+            esp_now_peer_info_t new_peer = { .channel = CHANNEL, .encrypt = false };
             memcpy(new_peer.peer_addr, info->src_addr, 6);
             esp_now_add_peer(&new_peer);
 
@@ -241,7 +229,6 @@ void on_receive(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
             master_keepalive = 5;
             return;
         }
-
 
         if(memcmp(received_str, "TIME_SYNC;", 10) == 0) {
             printf("Received Time Sync.\n");
@@ -304,7 +291,7 @@ void on_receive(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
             }
             memcpy(peers[peer_count].peer_mac, info->src_addr, 6);
             
-            esp_now_peer_info_t new_peer = { .channel = 1, .encrypt = false };
+            esp_now_peer_info_t new_peer = { .channel = CHANNEL, .encrypt = false };
             memcpy(new_peer.peer_addr, info->src_addr, 6);
             esp_now_add_peer(&new_peer);
 
@@ -339,9 +326,8 @@ void app_main(void) {
 
     esp_wifi_set_ps(WIFI_PS_NONE);
 
-    uint8_t target_channel = 1; 
     esp_wifi_set_promiscuous(true);
-    esp_wifi_set_channel(target_channel, WIFI_SECOND_CHAN_NONE);
+    esp_wifi_set_channel(CHANNEL, WIFI_SECOND_CHAN_NONE);
     esp_wifi_set_promiscuous(false);
 
     uint8_t my_mac[6];
@@ -367,7 +353,7 @@ void app_main(void) {
     esp_now_register_recv_cb(on_receive);
     esp_now_register_send_cb(on_sent);
 
-    esp_now_peer_info_t broadcast_info = { .channel = 1, .encrypt = false };
+    esp_now_peer_info_t broadcast_info = { .channel = CHANNEL, .encrypt = false };
     memset(broadcast_info.peer_addr, 0xFF, 6);
     
     if (esp_now_add_peer(&broadcast_info) != ESP_OK) {
@@ -375,30 +361,7 @@ void app_main(void) {
         return;
     }
 
-    // STARTUP IMAGE
-    vTaskDelay(pdMS_TO_TICKS(2000));
-    printf("AMPEL SYSTEM starting up.\n");
-    printf("::::::::::::::::::::::::\n");
-    printf("::::::::::::::::::::::::\n");
-    printf("::::--*#++*=*=*+%%:::::::\n");
-    printf(":..+@@@@@@@%%*##*+*#=:::=\n");
-    printf("..%%@@@@+==-----=*%%%%#::::\n");
-    printf("...%%@@*+==-----==+@+::::\n");
-    printf("....:=@%%%%@@@####@**:.::::\n");
-    printf("......==-=+=+==+==*-..::\n");
-    printf("......==*=#**+==++-....:\n");
-    printf("......+**+##%%@##*=......\n");
-    printf(".......%%*+**=*%%%%@%%.....\n");
-    printf(".:.:::@@+@#%%%%@@*=@%%-.:==\n");
-    printf(".::::@@@+++*#*+@%%@@:.:+:\n");
-    printf("#@@@@@@@@@+++@@@@@@@@%%--\n");
-    printf("@@@@@@@@@@@@@@@@@@@@@@@@\n");
-    printf("@@@@@%%@@@*%%@@@@@@@@@@@@@\n");
-    printf("@@@@@@@@*===@@@@@@@@@@@@\n");
-    printf("@@@@@#@@@%%@@@@@@@@@@@@@@\n");
-    printf("@@@@@:@@%%@@%%@@@@@@@@@@@@\n");
-    printf("@@@@@-@@@@%%@@@@@@@@@@@@@\n");
-
+    printf("AMPEL starting...\n");
 
     xTaskCreate(
         keepalive,      
@@ -480,21 +443,16 @@ void app_main(void) {
                     for(int i = 0; i < peer_count; i++) {
                         esp_now_send(peers[i].peer_mac, (uint8_t *)msg_buffer, 64);
                     }
-                    
                     state = STATE_RUN;
                 }
 
-                killswitch -= 1;
-                if(killswitch <= 0) {
-                    printf("KABUTT\n");
-                    printf("%d Killswitch", killswitch);
+                if(killswitch-- <= 0) {
                     esp_restart();
                 }
                 vTaskDelay(pdMS_TO_TICKS(1000));
                 break;
             case STATE_RUN:
                 if(role == ROLE_MASTER) {
-                    printf("Meister\n");
                     int64_t when = 20000000;
                     int64_t ts = esp_timer_get_time() + when;
 
@@ -520,8 +478,6 @@ void app_main(void) {
             default:
                 vTaskDelay(pdMS_TO_TICKS(1000));
                 break;
-        }
-        
+        } 
     }
-    
 }   
