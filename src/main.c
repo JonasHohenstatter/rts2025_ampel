@@ -138,7 +138,6 @@ void app_main(void) {
             int64_t offset = 2000000;
             int64_t now = esp_timer_get_time();
             int len = snprintf(msg_buffer, sizeof(msg_buffer), "START,%lli", now + offset);
-            
 
             esp_now_send(peer_mac, (uint8_t *)msg_buffer, len);
 

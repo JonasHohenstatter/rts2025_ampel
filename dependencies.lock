@@ -1,0 +1,19 @@
+dependencies:
+  idf:
+    source:
+      type: idf
+    version: 5.5.0
+  nopnop2002/tm1637:
+    component_hash: 
+      bb633e4e87eb36aa96dfdce5fda424d8b9ddd9555b3e1e92341fdf518b00390f
+    dependencies: []
+    source:
+      git: https://github.com/nopnop2002/esp-idf-tm1637.git
+      path: components/tm1637/
+      type: git
+    version: b8e25cfa0843dd5b0774d9bd9ac6a8367ae6a9f5
+direct_dependencies:
+- nopnop2002/tm1637
+manifest_hash: 3bdadb2d2e63c0025efdba5e760fe97c6ccbec9c39a01767b3bb5e0cc8b7ff2c
+target: esp32
+version: 2.0.0
