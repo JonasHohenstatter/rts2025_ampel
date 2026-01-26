@@ -32,7 +32,7 @@ peer_t peers[SETUP_SIZE - 1];
 size_t peer_count = 0;
 size_t PEERS_NEEDED = 1;
 uint8_t master_mac[6];
-int64_t master_keepalive = 1;
+int64_t master_keepalive = 3;
 QueueHandle_t taskQueue;
 
 int64_t next_event = 0;
@@ -47,34 +47,6 @@ typedef struct {
 
 // TODO: this isn't really accounting for delay, redo
 int64_t master_offset = 0;
-
-void show_time_count() {
-    while(1) {
-        switchParams_t *top_item = NULL;
-
-        // 1. Peek at the queue to find the truly "next" event
-        // We use a 0 timeout so the display task never blocks
-        if (xQueuePeek(taskQueue, &top_item, 0) == pdPASS && top_item != NULL) {
-            
-            // Calculate time based on the peeked item's timestamp
-            int64_t now_master = esp_timer_get_time() - master_offset;
-            int64_t delta = top_item->timestamp - now_master;
-            int64_t remaining_seconds = (delta / 1000000);
-
-            if (remaining_seconds < 0) remaining_seconds = 0;
-
-            tm1637_set_number(display, (uint16_t)remaining_seconds, false, 0);
-        } 
-        else {
-            // 2. Fallback: If queue is empty, show 0 or a dash
-            // This prevents the display from freezing on the last number
-            tm1637_set_number(display, 0, false, 0);
-        }
-
-        // Higher refresh rate (e.g., 200ms) makes the countdown feel smoother
-        vTaskDelay(pdMS_TO_TICKS(200));
-    }
-}
 
 void switch_lights(void *pvParameters) {
     switchParams_t *params = (switchParams_t *) pvParameters;
@@ -130,16 +102,22 @@ void run_tasks(void *pvParameters) {
 
             int64_t now_master = esp_timer_get_time() - master_offset;
             while (now_master < top_item->timestamp && state == STATE_RUN) {
-                int64_t diff_ms = (top_item->timestamp - now_master) / 1000;
+                int64_t diff_us = top_item->timestamp - now_master; // In Mikrosekunden rechnen!
                 
-                tm1637_set_number(display, (uint16_t)diff_ms/1000, false, 0);
-                
-                if (diff_ms > 10) {
-                    uint32_t sleep = (diff_ms > 100) ? 50 : (diff_ms / 2);
-                    vTaskDelay(pdMS_TO_TICKS(sleep));
-                } else {
-                    esp_rom_delay_us(100); 
+                // Display nur alle ~100ms aktualisieren (spart Ressourcen)
+                if (diff_us % 100000 < 2000) { 
+                    tm1637_set_number(display, (uint16_t)(diff_us / 1000000), false, 0);
                 }
+
+                if (diff_us > 20000) { // Mehr als 20ms übrig?
+                    vTaskDelay(pdMS_TO_TICKS(10)); // Ordentlich schlafen
+                } else if (diff_us > 1000) { // Zwischen 1ms und 20ms übrig?
+                    vTaskDelay(1); // Den kleinstmöglichen Tick warten (gibt CPU frei)
+                } else {
+                    // Die allerletzte Millisekunde: Präzises Warten ohne Context-Switch
+                    esp_rom_delay_us(10); 
+                }
+                
                 now_master = esp_timer_get_time() - master_offset;
             }
 
@@ -256,7 +234,7 @@ void on_receive(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
         snprintf(expected_str, sizeof(expected_str), "KEEPALIVE");
 
         if (strcmp(received_str, expected_str) == 0) {
-            master_keepalive = 1;
+            master_keepalive = 3;
             return;
         }
 
@@ -324,6 +302,10 @@ void on_receive(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
 }
 
 void app_main(void) {
+    printf("AMPEL starting...\n");
+
+    vTaskDelay(pdMS_TO_TICKS(3000));
+
     display = tm1637_init(CLK_PIN, DIO_PIN);
 
     tm1637_set_brightness(display, 7);
@@ -381,9 +363,8 @@ void app_main(void) {
         return;
     }
 
-    printf("AMPEL starting...\n");
 
-    taskQueue = xQueueCreate(10, sizeof(switchParams_t *));
+    taskQueue = xQueueCreate(50, sizeof(switchParams_t *));
 
     xTaskCreate(
         keepalive,      
@@ -413,7 +394,7 @@ void app_main(void) {
 
     state = STATE_INIT;
 
-    int killswitch = 3;
+    int killswitch = 7;
 
     int64_t ts = 0;
 
@@ -421,12 +402,13 @@ void app_main(void) {
         switch(state) {
             case STATE_INIT:
                 tm1637_set_number(display, 0, true, 0x00); 
+                vTaskDelay(pdMS_TO_TICKS(1000));
 
                 ts = 0;
                 xQueueReset(taskQueue);
 
                 master_offset = 0;
-                master_keepalive = 1;
+                master_keepalive = 3;
                 
                 printf("INIT_STATE\n");
                 for (int i = 0; i < LIGHT_COUNT; i++) {
@@ -436,6 +418,9 @@ void app_main(void) {
                 }
                 if(role == ROLE_MASTER) {
                     while(peer_count < (SETUP_SIZE - 1)) {
+                        if(killswitch-- <= 0) {
+                            esp_restart();
+                        }
                         printf("Master: SUCHE PEERS\n");
                         char buffer[64];
                         snprintf(buffer, sizeof(buffer), "MASTER;JOINME;%d", SETUP_ID);
@@ -464,6 +449,9 @@ void app_main(void) {
                 break;
             case STATE_RUN:
                 if(role == ROLE_MASTER) {
+                    while(uxQueueSpacesAvailable(taskQueue) == 0) {
+                        vTaskDelay(pdMS_TO_TICKS(1000));
+                    }
                     if(ts == 0) {
                         ts = esp_timer_get_time();
                     }
@@ -472,11 +460,11 @@ void app_main(void) {
 
                     ts = ts + 5000000;
 
+                    vTaskDelay(pdMS_TO_TICKS(500));
+
                     send_command(broadcast_info.peer_addr, 'G', 1, ts);
 
                     ts = ts + 15000000;
-
-                    vTaskDelay(pdMS_TO_TICKS(5000));
                 }
                 else {
                     vTaskDelay(pdMS_TO_TICKS(1000));
