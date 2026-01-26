@@ -15,11 +15,11 @@
 ampel_state_t state = STATE_INIT;
 ampel_config_t my_lights[] = {
     { .red = GPIO_NUM_18, .yellow = GPIO_NUM_22, .green = GPIO_NUM_23, 0 },
-    { .red = GPIO_NUM_13, .yellow = GPIO_NUM_12, .green = GPIO_NUM_14 ,0 },
+    { .red = GPIO_NUM_13, .yellow = GPIO_NUM_12, .green = GPIO_NUM_14 ,1 },
 };
 
 #define SETUP_ID 1
-#define SETUP_SIZE 4
+#define SETUP_SIZE 3
 #define CLK_PIN 18
 #define DIO_PIN 19
 #define Seconds * 1000000
@@ -32,7 +32,8 @@ peer_t peers[SETUP_SIZE - 1];
 size_t peer_count = 0;
 size_t PEERS_NEEDED = 1;
 uint8_t master_mac[6];
-int64_t master_keepalive = 5;
+int64_t master_keepalive = 1;
+QueueHandle_t taskQueue;
 
 int64_t next_event = 0;
 
@@ -49,18 +50,29 @@ int64_t master_offset = 0;
 
 void show_time_count() {
     while(1) {
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        switchParams_t *top_item = NULL;
 
-        if(next_event == 0) {
-            continue;
-        }
-        int64_t delta = next_event - esp_timer_get_time();
-        int64_t remaining_seconds = (delta / 1000000);
+        // 1. Peek at the queue to find the truly "next" event
+        // We use a 0 timeout so the display task never blocks
+        if (xQueuePeek(taskQueue, &top_item, 0) == pdPASS && top_item != NULL) {
+            
+            // Calculate time based on the peeked item's timestamp
+            int64_t now_master = esp_timer_get_time() - master_offset;
+            int64_t delta = top_item->timestamp - now_master;
+            int64_t remaining_seconds = (delta / 1000000);
 
-        if(remaining_seconds < 0) {
-            remaining_seconds = 0;
+            if (remaining_seconds < 0) remaining_seconds = 0;
+
+            tm1637_set_number(display, (uint16_t)remaining_seconds, false, 0);
+        } 
+        else {
+            // 2. Fallback: If queue is empty, show 0 or a dash
+            // This prevents the display from freezing on the last number
+            tm1637_set_number(display, 0, false, 0);
         }
-        tm1637_set_number(display, remaining_seconds, false, 0);
+
+        // Higher refresh rate (e.g., 200ms) makes the countdown feel smoother
+        vTaskDelay(pdMS_TO_TICKS(200));
     }
 }
 
@@ -68,22 +80,7 @@ void switch_lights(void *pvParameters) {
     switchParams_t *params = (switchParams_t *) pvParameters;
     char command = params->command;
     uint8_t group = params->group;
-    int64_t timestamp = params->timestamp;
 
-    next_event = timestamp;
-
-    vTaskDelay(pdMS_TO_TICKS(10));
-
-    int64_t now_master = esp_timer_get_time() - master_offset;
-    while (now_master < timestamp) {
-        int64_t diff_us = timestamp - now_master;
-        int64_t diff_ms = diff_us / 1000;
-        if (diff_ms < 1) diff_ms = 1;
-        if (diff_ms > 200) diff_ms = 200;
-
-        vTaskDelay(pdMS_TO_TICKS((uint32_t)diff_ms));
-        now_master = esp_timer_get_time() - master_offset;
-    }
     if (command == 'G') {
         printf("Switching to Green.\n");
         for (int i = 0; i < LIGHT_COUNT; i++) {
@@ -125,9 +122,41 @@ void switch_lights(void *pvParameters) {
     vTaskDelete(NULL);
 }
 
+void run_tasks(void *pvParameters) {
+    while(1) {
+        switchParams_t *top_item = NULL;
+        if (xQueuePeek(taskQueue, &top_item, portMAX_DELAY) == pdPASS && state == STATE_RUN) {
+            next_event = top_item->timestamp;
+
+            int64_t now_master = esp_timer_get_time() - master_offset;
+            while (now_master < top_item->timestamp && state == STATE_RUN) {
+                int64_t diff_ms = (top_item->timestamp - now_master) / 1000;
+                
+                tm1637_set_number(display, (uint16_t)diff_ms/1000, false, 0);
+                
+                if (diff_ms > 10) {
+                    uint32_t sleep = (diff_ms > 100) ? 50 : (diff_ms / 2);
+                    vTaskDelay(pdMS_TO_TICKS(sleep));
+                } else {
+                    esp_rom_delay_us(100); 
+                }
+                now_master = esp_timer_get_time() - master_offset;
+            }
+
+            if(state != STATE_RUN) {
+                continue;
+            }
+
+            switchParams_t *current_exec = NULL;
+            xQueueReceive(taskQueue, &current_exec, 0);
+
+            xTaskCreate(switch_lights, "switch_worker", 4096, current_exec, 5, NULL);
+        }
+    }
+}
+
 void send_command(uint8_t mac[6], char command, uint8_t group, int64_t timestamp) {
     char buffer[64];
-
 
     snprintf(buffer, sizeof(buffer), "COMMAND;%c;GROUP%d;%lli;%d", command, group, timestamp, SETUP_ID);
 
@@ -141,14 +170,7 @@ void send_command(uint8_t mac[6], char command, uint8_t group, int64_t timestamp
         p->group = group;
         p->timestamp = timestamp;
 
-        xTaskCreate(
-            switch_lights,      
-            "LightSwitchTask",  
-            4096,    
-            p,          // Pass the heap pointer
-            1,   
-            NULL
-        );
+        xQueueSend(taskQueue, &p, 0);
     }
 }
 
@@ -160,7 +182,6 @@ void keepalive() {
                 for(int i = 0; i < peer_count; i++) {
                     char buffer[64];
                     snprintf(buffer, sizeof(buffer), "KEEPALIVE");
-                    printf("Master: Sending keepalives.\n");
                     if(esp_now_send(peers[i].peer_mac, (uint8_t *) buffer, 64) != ESP_OK) {
                         for(int i = 0; i < peer_count; i++) {
                             esp_now_del_peer(peers[i].peer_mac);
@@ -173,11 +194,21 @@ void keepalive() {
                 }
             }
             else if(role == ROLE_SLAVE) {
-                if(master_keepalive-- <= 0) {
+                if(master_keepalive-- < 0) {
                     printf("Slave: Haven't received keepalive for a while, resetting.\n");
                     state = STATE_INIT;
                     esp_now_del_peer(master_mac);
                 }
+            }
+        }
+        if(state == STATE_INIT) {
+            vTaskDelay(pdMS_TO_TICKS(800));
+            for(int i = 0; i < LIGHT_COUNT; i++) {
+                gpio_set_level(my_lights[i].yellow, 1);
+            }
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            for(int i = 0; i < LIGHT_COUNT; i++) {
+                gpio_set_level(my_lights[i].yellow, 0);
             }
         }
     }
@@ -210,7 +241,6 @@ void on_receive(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
         if (strcmp(received_str, expected_str) == 0) {
             printf("Received JoinMe\n");
             if(memcmp(master_mac, info->src_addr, 6) != 0) return;
-            if(esp_now_is_peer_exist(info->src_addr)) return;
 
             esp_now_peer_info_t new_peer = { .channel = CHANNEL, .encrypt = false };
             memcpy(new_peer.peer_addr, info->src_addr, 6);
@@ -226,7 +256,7 @@ void on_receive(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
         snprintf(expected_str, sizeof(expected_str), "KEEPALIVE");
 
         if (strcmp(received_str, expected_str) == 0) {
-            master_keepalive = 5;
+            master_keepalive = 1;
             return;
         }
 
@@ -258,37 +288,29 @@ void on_receive(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
                 // 1. Speicher dynamisch reservieren (Heap)
                 // Jeder Task bekommt so seine EIGENE Kopie der Daten
                 switchParams_t *p = malloc(sizeof(switchParams_t));
-                
+
                 if (p != NULL) {
                     p->command = command;
                     p->group = group;
                     p->timestamp = timestamp;
 
-                    xTaskCreate(
-                        switch_lights,      
-                        "LightSwitchTask",  
-                        4096,    
-                        p,          // Wir übergeben den Pointer auf den reservierten Speicher
-                        1,   
-                        NULL
-                    );
+                    xQueueSend(taskQueue, &p, 0);
                 }
             }
         }
-
-        
     } 
     else {
         char expected_str[64];
         snprintf(expected_str, sizeof(expected_str), "SLAVE;JOIN;%d", SETUP_ID);
 
         if (strcmp(received_str, expected_str) == 0) {
-            printf("SLAVE JOINED\n");
+            
             for(int i = 0; i < peer_count; i++) {
                 if(memcmp(peers[i].peer_mac, info->src_addr, 6) == 0) {
                     return;
                 }
             }
+            
             memcpy(peers[peer_count].peer_mac, info->src_addr, 6);
             
             esp_now_peer_info_t new_peer = { .channel = CHANNEL, .encrypt = false };
@@ -304,11 +326,9 @@ void on_receive(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
 void app_main(void) {
     display = tm1637_init(CLK_PIN, DIO_PIN);
 
-    // 2. Helligkeit einstellen (0 = sehr dunkel, 7 = sehr hell)
-    tm1637_set_brightness(display, 5);
+    tm1637_set_brightness(display, 7);
 
-    // 3. Optional: Kurzer Start-Test (zeigt 0000)
-    tm1637_set_number(display, 15, true, 0x00); 
+    tm1637_set_number(display, 0, true, 0x00); 
     vTaskDelay(pdMS_TO_TICKS(500));
 
     esp_err_t ret = nvs_flash_init();
@@ -363,6 +383,8 @@ void app_main(void) {
 
     printf("AMPEL starting...\n");
 
+    taskQueue = xQueueCreate(10, sizeof(switchParams_t *));
+
     xTaskCreate(
         keepalive,      
         "Task Name",  
@@ -372,16 +394,18 @@ void app_main(void) {
         NULL
     );
 
+     xTaskCreate(
+        run_tasks,      
+        "Task Name",  
+        4096,    
+        NULL, 
+        1,   
+        NULL
+    );
+
+
     if(memcmp(my_mac, master_mac, 6) == 0) {
         role = ROLE_MASTER;
-        xTaskCreate(
-            show_time_count,
-            "Task Name",  
-            4096,    
-            NULL, 
-            1,   
-            NULL
-        );
     }
     else {
         role = ROLE_SLAVE;
@@ -389,15 +413,20 @@ void app_main(void) {
 
     state = STATE_INIT;
 
-    int killswitch = 7;
+    int killswitch = 3;
 
-    // known bug: restart in init phase lets others progress
-    // keepalives are just checked for successful sent, not for state of slave
+    int64_t ts = 0;
+
     while(1) {
         switch(state) {
             case STATE_INIT:
+                tm1637_set_number(display, 0, true, 0x00); 
+
+                ts = 0;
+                xQueueReset(taskQueue);
+
                 master_offset = 0;
-                master_keepalive = 5;
+                master_keepalive = 1;
                 
                 printf("INIT_STATE\n");
                 for (int i = 0; i < LIGHT_COUNT; i++) {
@@ -407,34 +436,13 @@ void app_main(void) {
                 }
                 if(role == ROLE_MASTER) {
                     while(peer_count < (SETUP_SIZE - 1)) {
-                        vTaskDelay(pdMS_TO_TICKS(100));
                         printf("Master: SUCHE PEERS\n");
                         char buffer[64];
                         snprintf(buffer, sizeof(buffer), "MASTER;JOINME;%d", SETUP_ID);
                         esp_now_send(broadcast_info.peer_addr, (uint8_t *) buffer, 64);
-                        for(int i = 0; i < LIGHT_COUNT; i++) {
-                            gpio_set_level(my_lights[i].yellow, 1);
-                        }
-                        vTaskDelay(pdMS_TO_TICKS(1000));
-                        for(int i = 0; i < LIGHT_COUNT; i++) {
-                            gpio_set_level(my_lights[i].yellow, 0);
-                        }
                         vTaskDelay(pdMS_TO_TICKS(1000));
                     }
                     printf("HAB ALLE\n");
-                }
-                else if(role == ROLE_SLAVE) {
-                    printf("SUCHE PAPA\n"); 
-                    for(int i = 0; i < LIGHT_COUNT; i++) {
-                        gpio_set_level(my_lights[i].yellow, 1);
-                    }
-                    vTaskDelay(pdMS_TO_TICKS(1000));
-                    for(int i = 0; i < LIGHT_COUNT; i++) {
-                        gpio_set_level(my_lights[i].yellow, 0);
-                    }
-                }
-                
-                if(role == ROLE_MASTER) {
                     char msg_buffer[64];
                     int64_t now = esp_timer_get_time();
 
@@ -445,35 +453,34 @@ void app_main(void) {
                     }
                     state = STATE_RUN;
                 }
-
-                if(killswitch-- <= 0) {
-                    esp_restart();
+                if(role == ROLE_SLAVE) {
+                    if(!esp_now_is_peer_exist(master_mac)) {
+                        if(killswitch-- <= 0) {
+                            esp_restart();
+                        }
+                    }
                 }
                 vTaskDelay(pdMS_TO_TICKS(1000));
                 break;
             case STATE_RUN:
                 if(role == ROLE_MASTER) {
-                    int64_t when = 20000000;
-                    int64_t ts = esp_timer_get_time() + when;
+                    if(ts == 0) {
+                        ts = esp_timer_get_time();
+                    }
 
-                    send_command(broadcast_info.peer_addr, 'G', 0, ts);
                     send_command(broadcast_info.peer_addr, 'R', 1, ts);
 
-                    vTaskDelay(pdMS_TO_TICKS(when / 1000));
+                    ts = ts + 5000000;
 
-                    when = 10000000;
-                    ts = esp_timer_get_time() + when;
+                    send_command(broadcast_info.peer_addr, 'G', 1, ts);
 
-                    send_command(broadcast_info.peer_addr, 'R', 0, ts + 10000000);       
-                    send_command(broadcast_info.peer_addr, 'G', 1, ts + 10000000);
+                    ts = ts + 15000000;
 
-                    vTaskDelay(pdMS_TO_TICKS(when / 1000));
+                    vTaskDelay(pdMS_TO_TICKS(5000));
                 }
                 else {
-                    printf("SLAVE\n");
-                     vTaskDelay(pdMS_TO_TICKS(1000));
+                    vTaskDelay(pdMS_TO_TICKS(1000));
                 }
-               
                 break;
             default:
                 vTaskDelay(pdMS_TO_TICKS(1000));
