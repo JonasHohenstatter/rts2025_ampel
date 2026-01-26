@@ -19,7 +19,7 @@ ampel_config_t my_lights[] = {
 };
 
 #define SETUP_ID 1
-#define SETUP_SIZE 4
+#define SETUP_SIZE 3
 #define CLK_PIN 18
 #define DIO_PIN 19
 #define Seconds * 1000000
@@ -36,6 +36,9 @@ int64_t master_keepalive = 5;
 
 int64_t next_event = 0;
 
+int64_t probe_send = 0;
+int64_t rtt;
+
 tm1637_led_t *display;
 
 typedef struct {
@@ -49,7 +52,7 @@ int64_t master_offset = 0;
 
 void show_time_count() {
     while(1) {
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        vTaskDelay(pdMS_TO_TICKS(500));
 
         if(next_event == 0) {
             continue;
@@ -155,6 +158,7 @@ void send_command(uint8_t mac[6], char command, uint8_t group, int64_t timestamp
 void keepalive() {
     while(1) {
         vTaskDelay(pdMS_TO_TICKS(200));
+
         if(state == STATE_RUN) {
             if(role == ROLE_MASTER) {
                 for(int i = 0; i < peer_count; i++) {
@@ -173,6 +177,10 @@ void keepalive() {
                 }
             }
             else if(role == ROLE_SLAVE) {
+                char buffer[64];
+                snprintf(buffer, sizeof(buffer), "PROBE;%d", SETUP_ID);
+                esp_now_send(master_mac, (uint8_t *) buffer, 64);
+                
                 if(master_keepalive-- <= 0) {
                     printf("Slave: Haven't received keepalive for a while, resetting.\n");
                     state = STATE_INIT;
@@ -183,6 +191,17 @@ void keepalive() {
     }
 }
 
+void rtt_probe() {
+    while(1) {
+        vTaskDelay(pdMS_TO_TICKS(10000));
+
+        char buffer[64];
+        snprintf(buffer, sizeof(buffer), "PROBE;%d", SETUP_ID);
+        esp_now_send(master_mac, (uint8_t *) buffer, 64);
+
+        probe_send = esp_timer_get_time();
+    }
+}
 
 void on_sent(const wifi_tx_info_t *tx_info, esp_now_send_status_t status) {
     if(status == ESP_NOW_SEND_FAIL) {
@@ -204,6 +223,16 @@ void on_receive(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
 
     if(role == ROLE_SLAVE){
         char expected_str[64];
+
+        snprintf(expected_str, sizeof(expected_str), "PROBE_RESP;%d", SETUP_ID);
+
+        if (strcmp(received_str, expected_str) == 0) {
+            if(probe_send != 0) {
+                rtt = esp_timer_get_time() - probe_send;
+                probe_send = 0;
+            }
+            return;
+        }
 
         snprintf(expected_str, sizeof(expected_str), "MASTER;JOINME;%d", SETUP_ID);
 
@@ -238,7 +267,7 @@ void on_receive(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
             int parsed = sscanf(received_str, "TIME_SYNC;%lli;%d", &master_time, &setup_id);
 
             if(parsed == 2 && setup_id == SETUP_ID) {
-                master_offset = esp_timer_get_time() - master_time;
+                master_offset = esp_timer_get_time() - (master_time + rtt/2);
                 state = STATE_RUN;
             }
             else {
@@ -280,6 +309,16 @@ void on_receive(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
     } 
     else {
         char expected_str[64];
+        snprintf(expected_str, sizeof(expected_str), "PROBE;%d", SETUP_ID);
+
+        if (strcmp(received_str, expected_str) == 0) {
+            char buffer[64];
+            snprintf(buffer, sizeof(buffer), "PROBE_RESP;%d", SETUP_ID);
+
+            esp_now_send(info->src_addr, (uint8_t *) buffer, 64);
+            return;
+        }
+
         snprintf(expected_str, sizeof(expected_str), "SLAVE;JOIN;%d", SETUP_ID);
 
         if (strcmp(received_str, expected_str) == 0) {
@@ -298,10 +337,14 @@ void on_receive(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
             peer_count++;
             return;
         }
+
+        
+
     }
 }
 
 void app_main(void) {
+    vTaskDelay(pdMS_TO_TICKS(2000));
     display = tm1637_init(CLK_PIN, DIO_PIN);
 
     // 2. Helligkeit einstellen (0 = sehr dunkel, 7 = sehr hell)
@@ -432,6 +475,9 @@ void app_main(void) {
                     for(int i = 0; i < LIGHT_COUNT; i++) {
                         gpio_set_level(my_lights[i].yellow, 0);
                     }
+                    if(killswitch-- <= 0) {
+                        esp_restart();
+                    }
                 }
                 
                 if(role == ROLE_MASTER) {
@@ -445,29 +491,34 @@ void app_main(void) {
                     }
                     state = STATE_RUN;
                 }
-
-                if(killswitch-- <= 0) {
-                    esp_restart();
-                }
                 vTaskDelay(pdMS_TO_TICKS(1000));
                 break;
             case STATE_RUN:
                 if(role == ROLE_MASTER) {
-                    int64_t when = 20000000;
-                    int64_t ts = esp_timer_get_time() + when;
+                    send_command(broadcast_info.peer_addr, 'G', 0, esp_timer_get_time());
+                    send_command(broadcast_info.peer_addr, 'R', 1, esp_timer_get_time());
+                
+                    while(state == STATE_RUN) {
+                        int64_t ts = esp_timer_get_time() + 10000000;
 
-                    send_command(broadcast_info.peer_addr, 'G', 0, ts);
-                    send_command(broadcast_info.peer_addr, 'R', 1, ts);
+                        send_command(broadcast_info.peer_addr, 'R', 0, ts);
+                        send_command(broadcast_info.peer_addr, 'G', 1, ts);
 
-                    vTaskDelay(pdMS_TO_TICKS(when / 1000));
+                        vTaskDelay(pdMS_TO_TICKS(100));
 
-                    when = 10000000;
-                    ts = esp_timer_get_time() + when;
+                        while(esp_timer_get_time() <= ts) {
+                            vTaskDelay(pdMS_TO_TICKS(500));
+                        }
 
-                    send_command(broadcast_info.peer_addr, 'R', 0, ts + 10000000);       
-                    send_command(broadcast_info.peer_addr, 'G', 1, ts + 10000000);
+                        send_command(broadcast_info.peer_addr, 'G', 0, ts + 10000000);
+                        send_command(broadcast_info.peer_addr, 'R', 1, ts + 10000000);
 
-                    vTaskDelay(pdMS_TO_TICKS(when / 1000));
+                        vTaskDelay(pdMS_TO_TICKS(1000));
+                        
+                        while(esp_timer_get_time() <= ts + 10000000) {
+                            vTaskDelay(pdMS_TO_TICKS(500));
+                        }
+                    }
                 }
                 else {
                     printf("SLAVE\n");
