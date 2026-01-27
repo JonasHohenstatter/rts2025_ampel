@@ -13,17 +13,55 @@
 \title{\textbf{AMPEL: Adaptive Multi-Phased Embedded Traffic Light System}}
 \author{
     Moritz Schuster \\
-    \texttt{}
+    \texttt{03771488}
+    \texttt{IN2060}
     \and
     Jonas Hohenstatter \\
     \texttt{ge87nes}
+    \texttt{IN2060}
 }
 \date{\today}
 
 \begin{document}
 
 \maketitle
+Motivation
+- smart city
+- easy to setup, no cable necessary
+- setup for ampeln for baustelle
 
+Prototype (2 ESP)
+- Dedicated Master, Slave
+- Hardcoded Phases
+Main Part:
+- Same code on all devices, Master orchestrastes Setup, dedicated cmds
+- Roles
+- States (Phases)
+- Communication Diagram
+(Code erklaeren)
+- Config (Defines, ampel_config_t, button_config_t)
+
+- Delay calculation (RTT)
+- Resilience (Failed Master/Slave; keepalives)
+- Switching the lights
+- Button pressed, interupts
+
+
+System properties
+- Hardware
+- Range
+
+Outlook:
+- Fussgaenger ampeln
+- Expanding groups
+- multiple setup
+- additional commands
+- configure via build (groups, master, group size)
+- security (no enryption atm)
+- risk of jamming of signal
+- Master negotiation
+- Threads are non deterministic
+- config over the air
 \include{include/introduction.tex}
 
 \end{document}

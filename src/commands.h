@@ -9,6 +9,11 @@ typedef struct {
 } ampel_config_t;
 
 typedef struct {
+    gpio_num_t button;
+    uint8_t group;
+} button_config_t;
+
+typedef struct {
     uint8_t peer_mac[6];
 } peer_t;
 
@@ -25,3 +30,4 @@ typedef enum {
     ROLE_MASTER,
     ROLE_SLAVE
 } role_t;
+

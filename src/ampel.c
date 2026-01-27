@@ -14,17 +14,23 @@
 
 ampel_state_t state = STATE_INIT;
 ampel_config_t my_lights[] = {
-    { .red = GPIO_NUM_18, .yellow = GPIO_NUM_22, .green = GPIO_NUM_23, 0 },
-    { .red = GPIO_NUM_13, .yellow = GPIO_NUM_12, .green = GPIO_NUM_14 ,0 },
+    { .red = GPIO_NUM_13, .yellow = GPIO_NUM_12, .green = GPIO_NUM_14 , .group = 0 },
+};
+button_config_t my_buttons[] = {
+    { .button = GPIO_NUM_16, .group = 1 }
 };
 
 #define SETUP_ID 1
-#define SETUP_SIZE 3
+#define SETUP_SIZE 4
 #define CLK_PIN 18
 #define DIO_PIN 19
 #define Seconds * 1000000
 #define CHANNEL 1
+#define GROUP_AMOUNT 2
 #define LIGHT_COUNT (sizeof(my_lights) / sizeof(ampel_config_t))
+
+volatile bool button_states[GROUP_AMOUNT];
+volatile bool interrupt = false;
 
 role_t role = ROLE_IDLE;
 
@@ -37,7 +43,7 @@ int64_t master_keepalive = 5;
 int64_t next_event = 0;
 
 int64_t probe_send = 0;
-int64_t rtt;
+int64_t rtt = 0;
 
 tm1637_led_t *display;
 
@@ -47,8 +53,23 @@ typedef struct {
     int64_t timestamp;
 } switchParams_t;
 
-// TODO: this isn't really accounting for delay, redo
 int64_t master_offset = 0;
+volatile bool clicked = false;
+
+void clear_button_states() {
+    for(int i = 0; i < GROUP_AMOUNT; i++) {
+        button_states[i] = false;
+    }
+}
+
+void IRAM_ATTR button_click(void *arg) {
+    uint32_t group_id = (uint32_t)arg;
+    if (group_id < GROUP_AMOUNT) {
+        if(!button_states[group_id]) {
+            button_states[group_id] = true;
+        }
+    }
+}
 
 void show_time_count() {
     while(1) {
@@ -63,11 +84,16 @@ void show_time_count() {
         if(remaining_seconds < 0) {
             remaining_seconds = 0;
         }
-        tm1637_set_number(display, remaining_seconds, false, 0);
+
+        if(state == STATE_RUN) {
+            tm1637_set_number(display, remaining_seconds, false, 0);
+        }
     }
 }
 
 void switch_lights(void *pvParameters) {
+    interrupt = false;
+
     switchParams_t *params = (switchParams_t *) pvParameters;
     char command = params->command;
     uint8_t group = params->group;
@@ -79,6 +105,10 @@ void switch_lights(void *pvParameters) {
 
     int64_t now_master = esp_timer_get_time() - master_offset;
     while (now_master < timestamp) {
+        if(interrupt) {
+            vTaskDelete(NULL);
+            return;
+        }
         int64_t diff_us = timestamp - now_master;
         int64_t diff_ms = diff_us / 1000;
         if (diff_ms < 1) diff_ms = 1;
@@ -157,10 +187,10 @@ void send_command(uint8_t mac[6], char command, uint8_t group, int64_t timestamp
 
 void keepalive() {
     while(1) {
-        vTaskDelay(pdMS_TO_TICKS(200));
-
+        vTaskDelay(pdMS_TO_TICKS(100));
         if(state == STATE_RUN) {
             if(role == ROLE_MASTER) {
+                
                 for(int i = 0; i < peer_count; i++) {
                     char buffer[64];
                     snprintf(buffer, sizeof(buffer), "KEEPALIVE");
@@ -177,10 +207,6 @@ void keepalive() {
                 }
             }
             else if(role == ROLE_SLAVE) {
-                char buffer[64];
-                snprintf(buffer, sizeof(buffer), "PROBE;%d", SETUP_ID);
-                esp_now_send(master_mac, (uint8_t *) buffer, 64);
-                
                 if(master_keepalive-- <= 0) {
                     printf("Slave: Haven't received keepalive for a while, resetting.\n");
                     state = STATE_INIT;
@@ -208,6 +234,7 @@ void on_sent(const wifi_tx_info_t *tx_info, esp_now_send_status_t status) {
         for(int i = 0; i < peer_count; i++) {
             esp_now_del_peer(peers[i].peer_mac);
         }
+        interrupt = true;
         peer_count = 0;
         state = STATE_INIT;
     }
@@ -305,8 +332,14 @@ void on_receive(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
             }
         }
 
-        
-    } 
+        snprintf(expected_str, sizeof(expected_str), "INTERRUPT;%d", SETUP_ID);
+
+        // can be expanded to be group specific
+        if (strcmp(received_str, expected_str) == 0) {
+            interrupt = true;
+            return;
+        }
+    }
     else {
         char expected_str[64];
         snprintf(expected_str, sizeof(expected_str), "PROBE;%d", SETUP_ID);
@@ -337,8 +370,16 @@ void on_receive(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
             peer_count++;
             return;
         }
+  
+        if(memcmp(received_str, "BUTTON_PRESSED;", 15) == 0) {
+            uint8_t group; int setup_id;
 
-        
+            int parsed = sscanf(received_str, "BUTTON_PRESSED;%hhd;%d", &group, &setup_id);
+
+            if(parsed == 2 && setup_id == SETUP_ID) {
+                button_states[group] = true;
+            }
+        }
 
     }
 }
@@ -347,13 +388,28 @@ void app_main(void) {
     vTaskDelay(pdMS_TO_TICKS(2000));
     display = tm1637_init(CLK_PIN, DIO_PIN);
 
-    // 2. Helligkeit einstellen (0 = sehr dunkel, 7 = sehr hell)
-    tm1637_set_brightness(display, 5);
+    clear_button_states();
 
-    // 3. Optional: Kurzer Start-Test (zeigt 0000)
-    tm1637_set_number(display, 15, true, 0x00); 
-    vTaskDelay(pdMS_TO_TICKS(500));
+    for(int i = 0; i < sizeof(my_buttons) / sizeof(button_config_t); i++) {
+        gpio_config_t io_conf = {
+            .intr_type = GPIO_INTR_NEGEDGE,
+            .mode = GPIO_MODE_INPUT,         
+            .pin_bit_mask = (1ULL << my_buttons[i].button),
+            .pull_up_en = 1,                  
+        };
+        gpio_config(&io_conf);
 
+        gpio_isr_handler_add(my_buttons[i].button, button_click, (void*) (uint32_t) my_buttons[i].group);
+
+        gpio_intr_enable(my_buttons[i].button);
+    }
+        
+    tm1637_set_brightness(display, 7);
+
+    tm1637_set_segment_ascii(display, "INIT");
+
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         nvs_flash_erase();
@@ -406,6 +462,8 @@ void app_main(void) {
 
     printf("AMPEL starting...\n");
 
+
+
     xTaskCreate(
         keepalive,      
         "Task Name",  
@@ -428,6 +486,14 @@ void app_main(void) {
     }
     else {
         role = ROLE_SLAVE;
+        xTaskCreate(
+            rtt_probe,
+            "Task Name",  
+            4096,    
+            NULL, 
+            1,   
+            NULL
+        );
     }
 
     state = STATE_INIT;
@@ -441,6 +507,8 @@ void app_main(void) {
             case STATE_INIT:
                 master_offset = 0;
                 master_keepalive = 5;
+                clear_button_states();
+                
                 
                 printf("INIT_STATE\n");
                 for (int i = 0; i < LIGHT_COUNT; i++) {
@@ -448,6 +516,8 @@ void app_main(void) {
                     gpio_set_level(my_lights[i].yellow, 0);
                     gpio_set_level(my_lights[i].green, 0);
                 }
+                vTaskDelay(pdMS_TO_TICKS(1000));
+                interrupt = false;
                 if(role == ROLE_MASTER) {
                     while(peer_count < (SETUP_SIZE - 1)) {
                         vTaskDelay(pdMS_TO_TICKS(100));
@@ -457,10 +527,17 @@ void app_main(void) {
                         esp_now_send(broadcast_info.peer_addr, (uint8_t *) buffer, 64);
                         for(int i = 0; i < LIGHT_COUNT; i++) {
                             gpio_set_level(my_lights[i].yellow, 1);
+                            for(int i = 0; i < 4; i++) {
+                                tm1637_set_segment_fixed(display, i, 0x40);
+                            }
+                            
                         }
                         vTaskDelay(pdMS_TO_TICKS(1000));
                         for(int i = 0; i < LIGHT_COUNT; i++) {
                             gpio_set_level(my_lights[i].yellow, 0);
+                            for(int i = 0; i < 4; i++) {
+                                tm1637_set_segment_fixed(display, i, 0x00);
+                            }
                         }
                         vTaskDelay(pdMS_TO_TICKS(1000));
                     }
@@ -506,23 +583,85 @@ void app_main(void) {
 
                         vTaskDelay(pdMS_TO_TICKS(100));
 
-                        while(esp_timer_get_time() <= ts) {
+                        while(esp_timer_get_time() <= ts && state == STATE_RUN) {
+                            if(esp_timer_get_time() <= ts - 5000000) {
+                                for (int i = 0; i < GROUP_AMOUNT; i++){
+                                    if(i == 1 && button_states[i]) {
+                                        char msg_buffer[64];
+
+                                        snprintf(msg_buffer, sizeof(msg_buffer), "INTERRUPT;%d", SETUP_ID);
+
+                                        for(int i = 0; i < peer_count; i++) {
+                                            esp_now_send(peers[i].peer_mac, (uint8_t *)msg_buffer, 64);
+                                        }
+
+                                        interrupt = true;
+
+                                        vTaskDelay(pdMS_TO_TICKS(500));
+
+                                        ts = esp_timer_get_time() + 3000000;
+
+                                        send_command(broadcast_info.peer_addr, 'R', 0, ts);
+                                        send_command(broadcast_info.peer_addr, 'G', 1, ts);
+
+                                        clear_button_states();
+                                    }
+                                }
+                            }
                             vTaskDelay(pdMS_TO_TICKS(500));
                         }
 
-                        send_command(broadcast_info.peer_addr, 'G', 0, ts + 10000000);
-                        send_command(broadcast_info.peer_addr, 'R', 1, ts + 10000000);
+                        if(state == STATE_INIT) {
+                            break;
+                        }
+
+                        ts = esp_timer_get_time() + 10000000;
+
+                        send_command(broadcast_info.peer_addr, 'G', 0, ts);
+                        send_command(broadcast_info.peer_addr, 'R', 1, ts);
 
                         vTaskDelay(pdMS_TO_TICKS(1000));
                         
-                        while(esp_timer_get_time() <= ts + 10000000) {
+                        while(esp_timer_get_time() <= ts && state == STATE_RUN) {
+                            if(esp_timer_get_time() <= ts - 5000000) {
+                                for (int i = 0; i < GROUP_AMOUNT; i++){
+                                    if(i == 0 && button_states[i]) {
+                                        char msg_buffer[64];
+
+                                        snprintf(msg_buffer, sizeof(msg_buffer), "INTERRUPT;%d", SETUP_ID);
+
+                                        for(int i = 0; i < peer_count; i++) {
+                                            esp_now_send(peers[i].peer_mac, (uint8_t *)msg_buffer, 64);
+                                        }
+
+                                        interrupt = true;
+
+                                        vTaskDelay(pdMS_TO_TICKS(500));
+
+                                        ts = esp_timer_get_time() + 3000000;
+
+                                        send_command(broadcast_info.peer_addr, 'G', 0, ts);
+                                        send_command(broadcast_info.peer_addr, 'R', 1, ts);
+
+                                        clear_button_states();
+                                    }
+                                }
+                            }
                             vTaskDelay(pdMS_TO_TICKS(500));
                         }
                     }
                 }
                 else {
                     printf("SLAVE\n");
-                     vTaskDelay(pdMS_TO_TICKS(1000));
+                    vTaskDelay(pdMS_TO_TICKS(1000));
+                    for(int i = 0; i < GROUP_AMOUNT; i++) {
+                        if (button_states[i]) {
+                            char buffer[64];
+                            snprintf(buffer, sizeof(buffer), "BUTTON_PRESSED;%d;%d",i,SETUP_ID);
+                            esp_now_send(master_mac, (uint8_t *) buffer, 64);
+                            button_states[i] = false;
+                        }
+                    }
                 }
                
                 break;
