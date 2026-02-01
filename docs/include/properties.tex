@@ -1,0 +1,38 @@
+\section{System Properties}
+
+This section is used to outline and analyze the underlying system properties such as the hardware and software that was used for this project. 
+
+\subsection{Hardware}
+
+The distributed fashion of this project requires the use of multiple microcontrollers with access to wireless communication. 
+To achieve this, a total number of four \texttt{(ESP 32-WROOM)} microcontrollers was chosen as the computational cluster.
+This 32-bit chip offers \SI{520}{\kilo\byte} of RAM and a dual core architecture at \SI{240}{\mega\hertz}.
+Additionally, it features a Wi-Fi antenna with a bit rate of up to \SI{150}{\mega\byte\per\second} aswell as a Bluetooth transmitter \cite{esp32_datasheet}. 
+For the interaction with the controlled cluster, the allows access to 32 GPIO pins with different capabilities. 
+The layout and design of the used board is visible in Figure \ref*{fig:esp32_pinout}.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.8\textwidth]{images/esp_layout.png}
+    \caption{Pinout diagram of the ESP32-WROOM module \cite{pinout_diagram}.}
+    \label{fig:esp32_pinout}
+\end{figure}
+
+To display the current state of each traffic light, multiple prebuilt LED modules were used for simplicity. 
+Each of them features a red, yellow and green LED, that can each be individually controlled using an input at the base of the module. 
+The method of output can be freely chosen and even set up to function with real-world traffic lights
+As an additional output the AMPEL can use a 4-digit 7-segment \texttt{TM1637} display to show numbers and ASCII characters. 
+This external module can be configured using a 4-pin interface that allows for a continuous data flow to the display. 
+
+\subsection{Software}
+
+The program that is running on the Espressif microcontrollers was created on the basis of the \texttt{ESP-IDF} framework using the PlatformIO development platform.
+This program is compiled and flashed from a \texttt{C} codebase and afterwards executed using the \texttt{FreeRTOS} operating system for real-time systems.
+FreeRTOS supplies the possibility to use threads and other concurrent execution utilities, which are crucial for the parallel output and communication capabilities of the AMPEL.
+It additionally includes timing capabilities that are used to effectively schedule tasks to be executed at a set timestamp.
+
+The communication between the ensemble of microcontrollers is handled by \texttt{ESP-Now}, which is a connectionless peer-to-peer protocol for wireless communication over Wifi.
+
+
+
+

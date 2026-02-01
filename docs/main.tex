@@ -9,6 +9,7 @@
 \usepackage{hyperref}          % For clickable links
 \usepackage{booktabs}          % For professional tables
 \usepackage{enumitem}          % Better lists
+\usepackage{siunitx}
 
 \title{\textbf{AMPEL: Adaptive Multi-Phased Embedded Traffic Light System}}
 \author{
@@ -25,43 +26,60 @@
 \begin{document}
 
 \maketitle
-Motivation
+Motivation (Moritz)
 - smart city
 - easy to setup, no cable necessary
 - setup for ampeln for baustelle
 
-Prototype (2 ESP)
+System properties/ Framework (Jonas)
+- Hardware (4 ESPs, ampeln, countdown timer)
+- Range (gemessen: 15,6m)
+- C; PlatformIO, ESP-IDF, EspNow, esp-idf-tm1637
+
+Prototype (2 ESP) (*Jonas,Arschloch)
 - Dedicated Master, Slave
 - Hardcoded Phases
-Main Part:
-- Same code on all devices, Master orchestrastes Setup, dedicated cmds
-- Roles
-- States (Phases)
-- Communication Diagram
-(Code erklaeren)
-- Config (Defines, ampel_config_t, button_config_t)
 
-- Delay calculation (RTT)
-- Resilience (Failed Master/Slave; keepalives)
-- Switching the lights
-- Button pressed, interupts
+Final Design:
+- Design: (Moritz)
+    - Same code on all devices, Master orchestrastes Setup, dedicated cmds
+    - Roles
+    - States (Phases)
+    - Communication Diagram
+    - Modularity (Group ID, Session ID, WIFI channels, lights, buttons, CMD)
+(Code im Detail erklaeren) (Jonas)
+- Config (Defines, ampel\_confi\_t, button\_config\_t)
+- INIT phase; Join, Time_sync
+    - Master offset
+    - Delay calculation (Probe, RTT)
+- RUN
+    - Resilience (Failed Master/Slave; keepalives)
+    - Switching the lights (CMD)
+    - Countdown (in Master)
+    - Skipping ahead (pedastrians) => button_pressed, interrupt, send new command
 
-
-System properties
-- Hardware
-- Range
-
-Outlook:
+Outlook: (Moritz)
 - Fussgaenger ampeln
+- check if light is actually on
 - Expanding groups
-- multiple setup
-- additional commands
+- multiple setups (using session ID, don't interfere)
+- additional commands (apart from switch lights)
 - configure via build (groups, master, group size)
 - security (no enryption atm)
-- risk of jamming of signal
+- risk of jamming signal
 - Master negotiation
 - Threads are non deterministic
-- config over the air
-\include{include/introduction.tex}
+- config over the air/ during build
+
+MÖGLICHERWEISE: modeling, design und analysis approach
+
+\include{include/motivation.tex}
+\include{include/properties.tex}
+\include{include/prototype.tex}
+\include{include/final_design.tex}
+\include{include/outlook.tex}
+
+\bibliographystyle{plain} % Or 'unsrt' if you want them in order of appearance
+\bibliography{references.bib} 
 
 \end{document}
