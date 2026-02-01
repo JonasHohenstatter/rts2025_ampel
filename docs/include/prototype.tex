@@ -1,0 +1,27 @@
+\section{First Prototype}
+
+The first prototype for this project was built in order to test the modalities of ESP-Now and to find out the challenges that the project idea poses. 
+This first sketch included only two microcontrollers with each having only a single connected traffic light module. 
+The main goal of it was to have the two microcontrollers synchronize their respective traffic light states using a time synchronization method.
+Additionally, the protoype was set to include some measures of fault tolerance to succesfully handle an error state of a device. 
+To achieve a successful time synchronization, we applied Chistian's algorithm to the setup by assigning the roles of server and client to the microcontrollers. 
+In order for this to work, we developed two different scripts for the two roles. 
+
+Immediately after startup, the server goes into a scanning state, in which it periodically broadcasts scanning fragments to inform the incoming client of the servers active state. 
+When the client receives this packet, it would immediately register the server as an ESP-NOW peer and send out an acknowledgement to the server. 
+During this initial state, both microcontrollers would blink the yellow light on the external module periodically, yet asynchronously.
+Upon reception of the clients acknowledgement, the server then extracts its current time in microseconds using \texttt{esp\_timer\_get\_time()} and transmits it to the client.
+The client then takes this value and calculates an offset of its own time to the servers timestamp such as done in Christian's algorithm. 
+Right after this, the server transmits a \texttt{START} command containing a timestamp with which the server instructs the client to start its traffic light cycle at the given time. 
+After reception of this timestamp, the client calculates the instant of the start event on the basis of its previously calculated server offset. 
+Both nodes then pause their execution until the synchronized timestamp is reached on both devices and then they go into a state of cycling through the different colors of a traffic light such as visible in a real scenario. 
+
+After each of the cycles, the server then transmits a \texttt{KEEPALIVE} message, to which the client has to respond with an acknowledgment. 
+If the \texttt{KEEPALIVE} is not received for a given time on the client side, it terminates the cycle and goes back into the yellow blinking state, not accepting any future \texttt{KEEPALIVE} messages before a resynchronization.
+Whenever the server stops receiving \texttt{ACK} messages for a while, it would terminate to the initial state, similarly. 
+This behaviour ensures, that no failure of any of the two nodes goes unnoticed by the other.
+
+There are multiple flaws that this first prototype had, such as the impossiblity of adding a second client without any additional measures. 
+Other problems are the absence of resynchronization and the ability of the light system to only show the same three colors over and over again, without any possibility to manipulate the cycle.
+These issues make the AMPEL rather inconvenient for the real-world use, which is why we will approach them thoroughly in the upcoming sections and the final project. 
+
