@@ -103,7 +103,7 @@ void switch_lights(void *pvParameters) {
 
     vTaskDelay(pdMS_TO_TICKS(10));
 
-    int64_t now_master = esp_timer_get_time() - master_offset;
+    int64_t now_master = esp_timer_get_time() - master_offset + (rtt/2);
     while (now_master < timestamp) {
         if(interrupt) {
             vTaskDelete(NULL);
@@ -115,7 +115,7 @@ void switch_lights(void *pvParameters) {
         if (diff_ms > 200) diff_ms = 200;
 
         vTaskDelay(pdMS_TO_TICKS((uint32_t)diff_ms));
-        now_master = esp_timer_get_time() - master_offset;
+        now_master = esp_timer_get_time() - master_offset + (rtt/2);
     }
     if (command == 'G') {
         printf("Switching to Green.\n");
@@ -190,11 +190,10 @@ void keepalive() {
         vTaskDelay(pdMS_TO_TICKS(100));
         if(state == STATE_RUN) {
             if(role == ROLE_MASTER) {
-                
+                char buffer[64];
+                snprintf(buffer, sizeof(buffer), "KEEPALIVE");
+                printf("Master: Sending keepalives.\n");
                 for(int i = 0; i < peer_count; i++) {
-                    char buffer[64];
-                    snprintf(buffer, sizeof(buffer), "KEEPALIVE");
-                    printf("Master: Sending keepalives.\n");
                     if(esp_now_send(peers[i].peer_mac, (uint8_t *) buffer, 64) != ESP_OK) {
                         for(int i = 0; i < peer_count; i++) {
                             esp_now_del_peer(peers[i].peer_mac);
@@ -294,7 +293,7 @@ void on_receive(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
             int parsed = sscanf(received_str, "TIME_SYNC;%lli;%d", &master_time, &setup_id);
 
             if(parsed == 2 && setup_id == SETUP_ID) {
-                master_offset = esp_timer_get_time() - (master_time + rtt/2);
+                master_offset = esp_timer_get_time() - master_time;
                 state = STATE_RUN;
             }
             else {
